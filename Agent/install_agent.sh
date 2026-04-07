@@ -1,6 +1,6 @@
 #!/bin/sh
 # =====================================================
-#  星尘探针 Agent 一键安装客户端脚本
+#  星尘探针 Agent 一键安装脚本
 #  支持多服务端推送 | Alpine / Debian / Ubuntu
 # =====================================================
 
@@ -73,6 +73,19 @@ collect_input() {
     title "配置服务端（支持多个，逐个填写）"
     SERVER_COUNT=0
 
+    # 第一个服务端：有默认值
+    DEFAULT_URL="https://tz.995566.xyz/push.php"
+    printf "\n  第 1 个服务端 push.php 地址（默认 %s）: " "$DEFAULT_URL"
+    read S_URL
+    [ -z "$S_URL" ] && S_URL="$DEFAULT_URL"
+    printf "  第 1 个服务端 Token: "
+    read S_TOKEN
+    [ -z "$S_TOKEN" ] && err "Token 不能为空"
+    SERVER_COUNT=1
+    eval "SERVER_URL_1=\"${S_URL}\""
+    eval "SERVER_TOKEN_1=\"${S_TOKEN}\""
+    ok "已添加服务端 1: ${S_URL}"
+
     while true; do
         NEXT=$((SERVER_COUNT + 1))
         printf "\n  第 %d 个服务端 push.php 完整地址（留空结束）: " "$NEXT"
@@ -88,8 +101,6 @@ collect_input() {
         eval "SERVER_TOKEN_${SERVER_COUNT}=\"${S_TOKEN}\""
         ok "已添加服务端 ${SERVER_COUNT}: ${S_URL}"
     done
-
-    [ "$SERVER_COUNT" -eq 0 ] && err "至少需要填写一个服务端"
 }
 
 # ── 4. 生成 agent.sh ─────────────────────────────
@@ -204,9 +215,16 @@ setup_autostart() {
 
     case "$OS" in
         alpine)
-            CRON_LINE="@reboot nohup sh $AGENT_PATH >> $LOG_PATH 2>&1 &"
-            ( crontab -l 2>/dev/null | grep -v "agent.sh"; echo "$CRON_LINE" ) | crontab -
-            ok "已写入 crontab @reboot"
+            # 用 OpenRC local.d 脚本，比 crontab @reboot 可靠
+            mkdir -p /etc/local.d
+            cat > /etc/local.d/probe-agent.start << 'LOCALEOF'
+#!/bin/sh
+nohup sh /root/agent.sh > /dev/null 2>&1 &
+LOCALEOF
+            chmod +x /etc/local.d/probe-agent.start
+            # 确保 local 服务已启用
+            rc-update add local default >/dev/null 2>&1
+            ok "已注册 OpenRC local.d 开机自启"
             ;;
         debian|redhat)
             cat > /etc/systemd/system/probe-agent.service << SVC
@@ -236,7 +254,7 @@ SVC
 # ── 6. 启动 ─────────────────────────────────────
 start_agent() {
     title "启动 Agent"
-    pkill -f "agent.sh" 2>/dev/null; sleep 1
+    pkill -f "/root/agent.sh" 2>/dev/null; sleep 1
 
     case "$OS" in
         debian|redhat)
@@ -244,12 +262,13 @@ start_agent() {
             ;;
     esac
 
-    nohup sh "$AGENT_PATH" >> "$LOG_PATH" 2>&1 &
-    sleep 1
-    if pgrep -f "agent.sh" >/dev/null 2>&1; then
-        ok "Agent 后台运行中（PID: $(pgrep -f agent.sh)）"
+    nohup sh /root/agent.sh > /dev/null 2>&1 &
+    sleep 2
+    if pgrep -f "/root/agent.sh" >/dev/null 2>&1; then
+        ok "Agent 已启动（PID: $(pgrep -f /root/agent.sh)）"
     else
-        err "启动失败，请手动运行: sh $AGENT_PATH"
+        ok "Agent 安装完成，请手动启动："
+        printf "  nohup sh /root/agent.sh > /dev/null 2>&1 &\n"
     fi
 }
 
