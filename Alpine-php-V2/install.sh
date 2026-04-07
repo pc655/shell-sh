@@ -28,20 +28,10 @@ domain_exists() {
 append_site_block() {
     local domain="$1"
     local site_dir="$2"
-    local site_type="$3"   # static | php | php_rewrite | proxy
+    local site_type="$3"   # php | php_rewrite | proxy
     local proxy_port="$4"
 
     case "$site_type" in
-        static)
-            cat >> "$CADDYFILE" <<EOF
-
-$domain {
-    root * $site_dir
-    encode gzip
-    file_server
-}
-EOF
-            ;;
         php)
             cat >> "$CADDYFILE" <<EOF
 
@@ -86,18 +76,16 @@ EOF
 choose_site_type() {
     echo ""
     echo -e "${BLUE}请选择站点类型：${PLAIN}"
-    echo "  1) 纯静态（file_server，无 PHP）"
-    echo "  2) PHP 无伪静态（普通 PHP 站）"
-    echo "  3) PHP + 伪静态（Typecho / WordPress 等）"
-    echo "  4) 反向代理（转发到本地端口）"
+    echo "  1) PHP 无伪静态（普通 PHP 站）"
+    echo "  2) PHP + 伪静态（Typecho / WordPress 等）"
+    echo "  3) 反向代理（转发到本地端口）"
     echo ""
     while true; do
-        read -p "请输入序号 [1-4]: " type_choice
+        read -p "请输入序号 [1-3]: " type_choice
         case "$type_choice" in
-            1) SITE_TYPE=static;      break ;;
-            2) SITE_TYPE=php;         break ;;
-            3) SITE_TYPE=php_rewrite; break ;;
-            4) SITE_TYPE=proxy;       break ;;
+            1) SITE_TYPE=php;         break ;;
+            2) SITE_TYPE=php_rewrite; break ;;
+            3) SITE_TYPE=proxy;       break ;;
             *) echo -e "${RED}无效输入，请重新选择${PLAIN}" ;;
         esac
     done
