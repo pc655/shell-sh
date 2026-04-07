@@ -11,7 +11,7 @@
 # 查看已配置域名列表
 ./install.sh list
 ```
-### 一键自动安装命令
+### Alpine-php-V2一键自动安装命令
 ```bash
 wget -qO install.sh https://raw.githubusercontent.com/pc655/shell-sh/main/Alpine-php-V2/install.sh && chmod u+x install.sh && ./install.sh
 ```
