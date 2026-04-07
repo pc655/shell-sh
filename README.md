@@ -18,5 +18,5 @@ wget -qO install.sh https://raw.githubusercontent.com/pc655/shell-sh/main/Alpine
 ---
 ### 星尘探针 Agent 一键安装客户端脚本
 ```bash
-wget -qO agent.sh https://raw.githubusercontent.com/pc655/shell-sh/main/Agent/agent.sh && chmod u+x agent.sh && ./agent.sh
+wget -qO install_agent.sh https://raw.githubusercontent.com/pc655/shell-sh/main/Agent/install_agent.sh && chmod u+x install_agent.sh && ./install_agent.sh
 ```
