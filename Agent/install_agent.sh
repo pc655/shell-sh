@@ -1,6 +1,7 @@
 #!/bin/sh
 # =====================================================
-#   星尘探针 Agent 一键安装脚本 (V2 修复版)
+#   星尘探针 Agent 一键安装脚本 (V4.0)
+#   功能：纯物理流量上报、域名补齐、多端并发上报
 # =====================================================
 
 AGENT_PATH="/root/agent.sh"
@@ -15,7 +16,6 @@ warn()  { printf "${YELLOW}[WARN]${NC}  %s\n" "$1"; }
 err()   { printf "${RED}[ERR ]${NC}  %s\n" "$1"; exit 1; }
 title() { printf "\n${BOLD}━━━━  %s  ━━━━${NC}\n" "$1"; }
 
-# ── 1. 检测系统 ──────────────────────────────────
 detect_os() {
     if   [ -f /etc/alpine-release ]; then OS="alpine"
     elif [ -f /etc/debian_version ];  then OS="debian"
@@ -24,15 +24,12 @@ detect_os() {
     fi
 }
 
-# ── 2. 安装依赖 ──────────────────────────────────
 install_deps() {
     title "检查依赖"
     NEED=""
     command -v curl >/dev/null 2>&1 || NEED="$NEED curl"
     command -v awk  >/dev/null 2>&1 || NEED="$NEED awk"
-
     if [ -n "$NEED" ]; then
-        warn "缺少:$NEED，正在安装..."
         case "$OS" in
             alpine) apk update -q && apk add -q curl || err "apk 失败" ;;
             debian) apt-get update -qq && apt-get install -y -qq curl gawk || err "apt 失败" ;;
@@ -43,126 +40,111 @@ install_deps() {
     ok "核心依赖已就绪"
 }
 
-# ── 3. 交互输入 ──────────────────────────────────
 collect_input() {
     title "配置节点信息"
-
-    printf "  节点 ID（如 DE-1-200）: "
+    printf "  节点 ID: "
     read INPUT_ID
     [ -z "$INPUT_ID" ] && err "节点 ID 不能为空"
 
-    printf "  上报间隔秒数（默认 2）: "
+    printf "  上报间隔秒数 (默认 2): "
     read INPUT_INTERVAL
     [ -z "$INPUT_INTERVAL" ] && INPUT_INTERVAL=2
 
     printf "  服务器所在区域 (回车自动识别): "
     read INPUT_REGION
     if [ -z "$INPUT_REGION" ]; then
-        info "正在通过 API 自动获取地理位置..."
-        # 换用更稳定的 API
         INPUT_REGION=$(curl -sk --max-time 5 "http://ip-api.com/json/?lang=zh-CN" | sed -n 's/.*"country":"\([^"]*\)".*/\1/p')
-        [ -z "$INPUT_REGION" ] && INPUT_REGION="德国" # 默认保底
+        [ -z "$INPUT_REGION" ] && INPUT_REGION="未知地区"
         ok "自动识别为: $INPUT_REGION"
     fi
 
-    SERVER_COUNT=1
-    printf "\n  服务端 push.php 地址 (默认 https://tz.995566.xyz/push.php): "
-    read S_URL
-    [ -z "$S_URL" ] && S_URL="https://tz.995566.xyz/push.php"
+    printf "\n${YELLOW}  [提醒] 域名格式: tz.995566.xyz (会自动补齐 push.php)${NC}\n"
+    printf "${YELLOW}  [多端] 多个域名请用英文逗号分隔: , ${NC}\n"
+    printf "  请输入服务端域名 (默认: tz.995566.xyz): "
+    read S_DOMAINS
+    [ -z "$S_DOMAINS" ] && S_DOMAINS="tz.995566.xyz"
+    
     printf "  服务端 Token: "
     read S_TOKEN
     [ -z "$S_TOKEN" ] && err "Token 不能为空"
-    
-    SERVER_URL_1="$S_URL"
-    SERVER_TOKEN_1="$S_TOKEN"
 }
 
-# ── 4. 生成 agent.sh (重点修复逻辑) ──────────────
 generate_agent() {
     title "生成 Agent 脚本"
 
-    # 使用临时文件逐行写入变量，彻底避免粘连
+    # 写入配置
     cat > "$AGENT_PATH" << EOF
 #!/bin/sh
-# 星尘探针 Agent
-
-# ═══ 配置区 ════════════════════════════════════
 ID="${INPUT_ID}"
 INTERVAL=${INPUT_INTERVAL}
 REGION="${INPUT_REGION}"
-SERVER_URL_1="${SERVER_URL_1}"
-SERVER_TOKEN_1="${SERVER_TOKEN_1}"
-SERVER_COUNT=1
-# ════════════════════════════════════════════════
-
+SERVER_TOKEN="${S_TOKEN}"
 EOF
 
-    # 写入主体逻辑 (注意对 \$ 的处理)
+    # 动态处理域名
+    _count=0
+    OLD_IFS="$IFS"; IFS=","
+    for dom in $S_DOMAINS; do
+        _count=$((_count + 1))
+        clean_dom=$(echo "$dom" | tr -d ' ')
+        case "$clean_dom" in
+            http*) final_url="$clean_dom" ;;
+            *) final_url="https://$clean_dom" ;;
+        esac
+        final_url=$(echo "$final_url" | sed 's/\/*$//')"/push.php"
+        echo "SERVER_URL_${_count}=\"$final_url\"" >> "$AGENT_PATH"
+    done
+    IFS="$OLD_IFS"
+    echo "SERVER_COUNT=$_count" >> "$AGENT_PATH"
+
+    # 写入逻辑 (纯物理流量模式)
     cat >> "$AGENT_PATH" << 'AGENT_SCRIPT'
 ARCH=$(uname -m)
-if [ -f /etc/os-release ]; then
-    # 修复版获取 OS：提取引号内的 PRETTY_NAME
-    OS=$(grep "^PRETTY_NAME=" /etc/os-release | cut -d'=' -f2- | tr -d '"')
-elif [ -f /etc/redhat-release ]; then
-    OS=$(cat /etc/redhat-release)
-else
-    OS=$(uname -s)
-fi
-
+[ -f /etc/os-release ] && OS=$(grep "^PRETTY_NAME=" /etc/os-release | cut -d'=' -f2- | tr -d '"') || OS=$(uname -s)
 CPU_NAME=$(grep "model name" /proc/cpuinfo | head -n 1 | cut -d':' -f2 | sed 's/^[ \t]*//')
-[ -z "$CPU_NAME" ] && CPU_NAME=$(grep "Hardware" /proc/cpuinfo | cut -d':' -f2 | sed 's/^[ \t]*//')
 [ -z "$CPU_NAME" ] && CPU_NAME="$ARCH"
 
-get_cpu_stats() {
-    grep '^cpu ' /proc/stat | awk '{print $2" "$3" "$4" "$5" "$6" "$7" "$8}'
-}
+get_cpu_stats() { grep '^cpu ' /proc/stat | awk '{print $2" "$3" "$4" "$5" "$6" "$7" "$8}'; }
 PREV_STATS=$(get_cpu_stats)
 
 while true; do
     sleep $INTERVAL
-    CURR_STATS=$(get_cpu_stats)
-    set -- $PREV_STATS; p_u=$1; p_n=$2; p_s=$3; p_i=$4; p_io=$5; p_ir=$6; p_so=$7
+    
+    # 1. CPU 使用率
+    CURR_STATS=$(get_cpu_stats); set -- $PREV_STATS; p_u=$1; p_n=$2; p_s=$3; p_i=$4; p_io=$5; p_ir=$6; p_so=$7
     set -- $CURR_STATS; c_u=$1; c_n=$2; c_s=$3; c_i=$4; c_io=$5; c_ir=$6; c_so=$7
-    du=$((c_u-p_u)); dn=$((c_n-p_n)); ds=$((c_s-p_s))
-    di=$((c_i-p_i)); dio=$((c_io-p_io)); dir=$((c_ir-p_ir)); dso=$((c_so-p_so))
-    total=$((du+dn+ds+di+dio+dir+dso))
+    total=$(( (c_u-p_u)+(c_n-p_n)+(c_s-p_s)+(c_i-p_i)+(c_io-p_io)+(c_ir-p_ir)+(c_so-p_so) ))
     if [ "$total" -gt 0 ]; then
-        used=$((total - di)); pc=$((used * 100 / total))
+        pc=$(((total - (c_i-p_i)) * 100 / total))
         [ "$pc" -gt 100 ] && pc=100
         if [ "$pc" -ge 100 ]; then CPU_USAGE="1.00"; elif [ "$pc" -lt 10 ]; then CPU_USAGE="0.0${pc}"; else CPU_USAGE="0.${pc}"; fi
-    else
-        CPU_USAGE="0.00"
-    fi
+    else CPU_USAGE="0.00"; fi
     PREV_STATS=$CURR_STATS
 
-    M_INFO=$(cat /proc/meminfo)
-    M_TOTAL=$(echo "$M_INFO" | awk '/^MemTotal:/{print int($2/1024)}')
-    M_AVAIL=$(echo "$M_INFO" | awk '/^MemAvailable:/{print int($2/1024)}')
-    [ -z "$M_AVAIL" ] && M_AVAIL=0
-    M_USED=$((M_TOTAL - M_AVAIL))
-    [ "$M_USED" -lt 0 ] && M_USED=0
-
+    # 2. 内存/在线时间/磁盘
+    M_TOTAL=$(awk '/^MemTotal:/{print int($2/1024)}' /proc/meminfo)
+    M_AVAIL=$(awk '/^MemAvailable:/{print int($2/1024)}' /proc/meminfo)
+    M_USED=$((M_TOTAL - M_AVAIL)); [ "$M_USED" -lt 0 ] && M_USED=0
     UPTIME=$(awk '{print int($1)}' /proc/uptime)
     D_INFO=$(df -Pm / | tail -n 1)
-    D_TOTAL=$(echo "$D_INFO" | awk '{print $2}')
-    D_USED=$(echo  "$D_INFO" | awk '{print $3}')
+    D_TOTAL=$(echo "$D_INFO" | awk '{print $2}'); D_USED=$(echo "$D_INFO" | awk '{print $3}')
 
-    NET_RAW=$(awk '/: /{
-        gsub(/:/, " ")
-        if ($1 != "lo") { rx += $2; tx += $10 }
-    } END { print rx","tx }' /proc/net/dev)
+    # 3. 流量上报 (哪吒模式：直接上报网卡物理数值)
+    NET_REPORT=$(awk '/: /{gsub(/:/, " "); if ($1 != "lo") { rx += $2; tx += $10 }} END { print rx","tx }' /proc/net/dev)
 
+    # 4. 连接数
     PROCESS_COUNT=$(ps -ef | wc -l)
     TCP_CONN=$(grep -v "local_address" /proc/net/tcp /proc/net/tcp6 2>/dev/null | wc -l)
     UDP_CONN=$(grep -v "local_address" /proc/net/udp /proc/net/udp6 2>/dev/null | wc -l)
 
+    # 5. 多端推送
     _i=1
     while [ "$_i" -le "$SERVER_COUNT" ]; do
-        eval "_URL=\$SERVER_URL_${_i}"; eval "_TOKEN=\$SERVER_TOKEN_${_i}"
+        eval "_URL=\$SERVER_URL_${_i}"
         curl -sk --max-time 8 -X POST "$_URL" \
-            -d "token=$_TOKEN" -d "id=$ID" -d "uptime=$UPTIME" \
+            -d "token=$SERVER_TOKEN" -d "id=$ID" -d "uptime=$UPTIME" \
             -d "load=$CPU_USAGE" -d "mem=$M_TOTAL,$M_USED" \
-            -d "disk=$D_TOTAL,$D_USED" -d "net=$NET_RAW" \
+            -d "disk=$D_TOTAL,$D_USED" -d "net=$NET_REPORT" \
             -d "process=$PROCESS_COUNT" -d "tcp=$TCP_CONN" -d "udp=$UDP_CONN" \
             -d "arch=$ARCH" -d "os=$OS" -d "region=$REGION" -d "cpu_name=$CPU_NAME" > /dev/null 2>&1
         _i=$((_i + 1))
@@ -171,18 +153,16 @@ done
 AGENT_SCRIPT
 
     chmod +x "$AGENT_PATH"
-    ok "Agent 已生成并修复排版与抓取逻辑"
 }
 
-# ── 5. 自启逻辑保持一致 ──────────────────────────
 setup_autostart() {
     title "设置开机自启"
     case "$OS" in
         alpine)
             mkdir -p /etc/local.d
-            cat > /etc/local.d/probe-agent.start << 'EOF'
+            cat > /etc/local.d/probe-agent.start << EOF
 #!/bin/sh
-nohup sh /root/agent.sh >> /var/log/agent.log 2>&1 &
+nohup sh $AGENT_PATH >> $LOG_PATH 2>&1 &
 EOF
             chmod +x /etc/local.d/probe-agent.start
             rc-update add local default >/dev/null 2>&1 ;;
@@ -200,7 +180,6 @@ WantedBy=multi-user.target
 SVC
             systemctl daemon-reload && systemctl enable probe-agent >/dev/null 2>&1 ;;
     esac
-    ok "自启配置完成"
 }
 
 start_agent() {
@@ -214,7 +193,7 @@ start_agent() {
 }
 
 main() {
-    printf "\n${BOLD}${CYAN}  星尘探针 Agent 一键安装 (V2 修复版)${NC}\n\n"
+    printf "\n${BOLD}${CYAN}  星尘探针 Agent 一键安装 (哪吒模式 V4.0)${NC}\n"
     detect_os
     install_deps
     collect_input
@@ -222,7 +201,7 @@ main() {
     setup_autostart
     start_agent
     title "安装完成"
-    ok "日志查看: tail -f $LOG_PATH"
+    ok "当前模式：服务端记账 (客户端仅上报物理全量)"
 }
 
 main
