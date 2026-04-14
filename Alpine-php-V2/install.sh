@@ -313,16 +313,28 @@ if [ "$install_v2ray" = "y" ]; then
       "listen": "127.0.0.1",
       "protocol": "vless",
       "settings": {
-        "clients": [{ "id": "$v2_uuid", "level": 0 }],
+        "clients": [
+          {
+            "id": "$v2_uuid",
+            "level": 0
+          }
+        ],
         "decryption": "none"
       },
       "streamSettings": {
         "network": "ws",
-        "wsSettings": { "path": "$v2_path" }
+        "wsSettings": {
+          "path": "$v2_path"
+        }
       }
     }
   ],
-  "outbounds": [{ "protocol": "freedom", "settings": {} }]
+  "outbounds": [
+    {
+      "protocol": "freedom",
+      "settings": {}
+    }
+  ]
 }
 EOF
 
