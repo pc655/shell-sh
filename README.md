@@ -15,8 +15,13 @@
 ```bash
 wget -qO install.sh https://raw.githubusercontent.com/pc655/shell-sh/main/Alpine-php-V2/install.sh && chmod u+x install.sh && ./install.sh
 ```
+### Alpine-Cps 自动安装命令
+```bash
+wget -qO install.sh https://raw.githubusercontent.com/pc655/shell-sh/main/Alpine-php-V2/install_cpsv.sh && chmod u+x install_cpsv.sh && ./install_cpsv.sh
+```
+
 ---
-### 星尘探针 Agent 一键安装客户端脚本
+### 星尘 Agent安装客户端脚本
 ```bash
 wget -qO install_agent.sh https://raw.githubusercontent.com/pc655/shell-sh/main/Agent/install_agent.sh && chmod u+x install_agent.sh && ./install_agent.sh
 ```
