@@ -17,7 +17,7 @@ wget -qO install.sh https://raw.githubusercontent.com/pc655/shell-sh/main/Alpine
 ```
 ### Alpine-Cps 自动安装命令
 ```bash
-wget -qO install.sh https://raw.githubusercontent.com/pc655/shell-sh/main/Alpine-php-V2/install_cpsv.sh && chmod u+x install_cpsv.sh && ./install_cpsv.sh
+wget -qO install_cpsv.sh https://raw.githubusercontent.com/pc655/shell-sh/main/Alpine-php-V2/install_cpsv.sh && chmod u+x install_cpsv.sh && ./install_cpsv.sh
 ```
 
 ---
