@@ -1,7 +1,7 @@
 #!/bin/sh
 # =====================================================
-#   星尘探针 Agent 一键安装脚本 (V4.2)
-#   功能：支持参数安装、2秒高频上报、手动运行调试显示
+#   星尘探针 Agent 一键安装脚本 (修复版 V4.3)
+#   功能：支持 --api 参数、2秒上报、手动运行调试输出
 # =====================================================
 
 AGENT_PATH="/root/agent.sh"
@@ -42,33 +42,33 @@ install_deps() {
 
 collect_input() {
     title "配置节点信息"
-    
     # 解析命令行参数
     while [ "$#" -gt 0 ]; do
         case "$1" in
             --id) INPUT_ID="$2"; shift 2 ;;
             --token) S_TOKEN="$2"; shift 2 ;;
+            --api) S_API="$2"; shift 2 ;;
             *) shift ;;
         esac
     done
 
-    # 节点 ID 检查
     if [ -z "$INPUT_ID" ]; then
         printf "  节点 ID: "
         read INPUT_ID
     fi
     [ -z "$INPUT_ID" ] && err "节点 ID 不能为空"
 
-    # 区域识别
     INPUT_REGION=$(curl -sk --max-time 5 "http://ip-api.com/json/?lang=zh-CN" | sed -n 's/.*"country":"\([^"]*\)".*/\1/p')
     [ -z "$INPUT_REGION" ] && INPUT_REGION="未知地区"
     ok "自动识别地区: $INPUT_REGION"
 
-    # 默认域名配置（固化上报间隔为 2 秒）
-    S_DOMAINS="tz.995566.xyz"
-    S_INTERVALS="2"
-    
-    # Token 检查
+    # 处理上报域名
+    if [ -n "$S_API" ]; then
+        S_DOMAINS=$(echo "$S_API" | sed -e 's/http:\/\///g' -e 's/https:\/\///g' -e 's/\/*$//')
+    else
+        S_DOMAINS="tz.995566.xyz"
+    fi
+
     if [ -z "$S_TOKEN" ]; then
         printf "  服务端 Token: "
         read S_TOKEN
@@ -79,6 +79,7 @@ collect_input() {
 generate_agent() {
     title "生成 Agent 脚本"
 
+    # 第一阶段：写入静态变量（不带单引号，允许解析当前安装环境的变量）
     cat > "$AGENT_PATH" << EOF
 #!/bin/sh
 ID="${INPUT_ID}"
@@ -86,25 +87,27 @@ REGION="${INPUT_REGION}"
 SERVER_TOKEN="${S_TOKEN}"
 EOF
 
-    # 处理域名和 2 秒间隔
+    # 第二阶段：处理 URL 逻辑（修复 97 行报错的关键：在写入前处理好字符串）
     _count=0
     for dom in $S_DOMAINS; do
         _count=$((_count + 1))
         case "$dom" in
-            http*) final_url="$dom" ;;
-            *) final_url="https://$dom" ;;
+            http*) base_url="$dom" ;;
+            *)     base_url="https://$dom" ;;
         esac
-        final_url=\$(echo "\$final_url" | sed 's/\/*$//')
-        case "\$dom" in
-            *workers.dev*) final_url="\${final_url}/push" ;;
-            *)             final_url="\${final_url}/push.php" ;;
+        base_url=$(echo "$base_url" | sed 's/\/*$//')
+        
+        case "$dom" in
+            *workers.dev*) final_url="${base_url}/push" ;;
+            *)             final_url="${base_url}/push.php" ;;
         esac
-        echo "SERVER_URL_${_count}=\"\$final_url\"" >> "$AGENT_PATH"
+        
+        echo "SERVER_URL_${_count}=\"${final_url}\"" >> "$AGENT_PATH"
         echo "SERVER_INTERVAL_${_count}=2" >> "$AGENT_PATH"
     done
     echo "SERVER_COUNT=$_count" >> "$AGENT_PATH"
 
-    # 写入 Agent 主逻辑
+    # 第三阶段：追加主循环逻辑（使用单引号 'AGENT_SCRIPT'，确保脚本内容原样写入，不被 bash 误解析）
     cat >> "$AGENT_PATH" << 'AGENT_SCRIPT'
 ARCH=$(uname -m)
 [ -f /etc/os-release ] && OS=$(grep "^PRETTY_NAME=" /etc/os-release | cut -d'=' -f2- | tr -d '"') || OS=$(uname -s)
@@ -121,7 +124,7 @@ done
 
 PREV_STATS=$(get_cpu_stats)
 
-# 检测是否在终端手动运行
+# 调试模式检测：如果是手动在终端运行，则 DEBUG=1
 [ -t 1 ] && DEBUG=1 || DEBUG=0
 
 while true; do
@@ -157,10 +160,10 @@ while true; do
         if [ "$(($NOW - $_LAST))" -ge "$_IV" ]; then
             POST_DATA="token=$SERVER_TOKEN&id=$ID&uptime=$UPTIME&load=$CPU_USAGE&mem=$M_TOTAL,$M_USED&disk=$D_TOTAL,$D_USED&net=$NET_REPORT&process=$PROCESS_COUNT&tcp=$TCP_CONN&udp=$UDP_CONN&arch=$ARCH&os=$OS&region=$REGION&cpu_name=$CPU_NAME"
             
-            # 手动运行时打印上报内容
+            # 手动运行时显示输出
             if [ "$DEBUG" -eq 1 ]; then
                 echo "[$(date '+%H:%M:%S')] 上报至 $_URL"
-                echo "数据: $POST_DATA"
+                echo "数据内容: $POST_DATA"
             fi
 
             curl -sk --max-time 5 -X POST "$_URL" -d "$POST_DATA" > /dev/null 2>&1
@@ -215,7 +218,7 @@ main() {
     setup_autostart
     start_agent
     title "安装完成"
-    echo "提示：如需查看实时上报内容，请执行: sh $AGENT_PATH"
+    echo "提示：手动运行可以查看内容，执行命令: sh $AGENT_PATH"
 }
 
 main "$@"
