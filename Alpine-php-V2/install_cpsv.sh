@@ -95,15 +95,6 @@ choose_site_type() {
 #  新增功能函数
 # ══════════════════════════════════════════════════════════════
 
-# 检查文件是否存在，再移动并授权
-if [ -f "install_cpsv.sh" ]; then
-    mv install_cpsv.sh /usr/bin/cps
-    chmod +x /usr/bin/cps
-    echo "已成功安装：cps 命令已添加到 /usr/bin"
-else
-    echo "错误：install_cpsv.sh 文件不存在"
-fi
-
 # 重启Caddy
 restart_caddy() {
     echo -e "${BLUE}正在重启 Caddy 服务...${PLAIN}"
@@ -190,13 +181,11 @@ main_menu() {
                 break
                 ;;
             2) 
-                # 调用原有add逻辑
-                "$0" add
+                add_host
                 break
                 ;;
             3) 
-                # 调用原有del逻辑
-                "$0" del
+                del_host
                 break
                 ;;
             4) 
@@ -415,6 +404,14 @@ INITEOF
         echo -e "${GREEN}域名 $blog_domain 已绑定完成。${PLAIN}"
     fi
 
+    # ── 注册全局 cps 命令 ─────────────────────────────────────────
+    SCRIPT_PATH="$(readlink -f "$0")"
+    if [ "$SCRIPT_PATH" != "/usr/local/bin/cps" ]; then
+        cp "$SCRIPT_PATH" /usr/local/bin/cps
+        chmod +x /usr/local/bin/cps
+        echo -e "${GREEN}已注册全局命令，今后直接输入 cps 即可进入管理面板。${PLAIN}"
+    fi
+
     # ── 最终输出 ──────────────────────────────────────────────────
     echo ""
     echo -e "${GREEN}==============================================${PLAIN}"
@@ -435,120 +432,125 @@ INITEOF
     fi
 
     echo -e "${GREEN}==============================================${PLAIN}"
-    echo -e "  追加新域名: ${BLUE}./install.sh add${PLAIN}"
-    echo -e "  删除域名:   ${BLUE}./install.sh del${PLAIN}"
-    echo -e "  查看域名:   ${BLUE}./install.sh list${PLAIN}"
-    echo -e "${GREEN}==============================================${PLAIN}"
 }
 
 # ══════════════════════════════════════════════════════════════
-#  脚本入口逻辑
+#  添加主机
 # ══════════════════════════════════════════════════════════════
 
-# 如果参数是 add/del/list，执行原有逻辑
-if [ "$1" = "add" ] || [ "$1" = "del" ] || [ "$1" = "list" ]; then
-    # 原有 add/del/list 逻辑
-    if [ "$1" = "add" ]; then
-        echo -e "${BLUE}=== 追加新域名 ===${PLAIN}"
+add_host() {
+    echo -e "${BLUE}=== 追加新域名 ===${PLAIN}"
 
-        # 域名
-        while true; do
-            read -p "请输入域名 (例: cctv.xyz): " new_domain
-            [ -n "$new_domain" ] && break
-            echo -e "${RED}域名不能为空！${PLAIN}"
-        done
-
-        # 检查是否已存在
-        if domain_exists "$new_domain"; then
-            echo -e "${RED}域名 $new_domain 已存在于 Caddyfile，请先删除后再添加。${PLAIN}"
-            exit 1
-        fi
-
-        # 站点类型
-        choose_site_type
-
-        # 反向代理：只需要端口
-        if [ "$SITE_TYPE" = "proxy" ]; then
-            while true; do
-                read -p "请输入转发端口 (例: 3000): " proxy_port
-                echo "$proxy_port" | grep -qE '^[0-9]+$' && break
-                echo -e "${RED}端口必须为数字！${PLAIN}"
-            done
-            backup_caddyfile
-            append_site_block "$new_domain" "" "proxy" "$proxy_port"
-        else
-            # 需要网站目录
-            while true; do
-                read -p "请输入网站目录 (例: /home/www/site): " new_dir
-                [ -n "$new_dir" ] && break
-                echo -e "${RED}目录不能为空！${PLAIN}"
-            done
-            mkdir -p "$new_dir"
-            chown -R www-data:www-data "$new_dir"
-            chmod -R 755 "$new_dir"
-            backup_caddyfile
-            append_site_block "$new_domain" "$new_dir" "$SITE_TYPE" ""
-        fi
-
-        rc-service caddy reload
-        echo -e "${GREEN}完成！$new_domain 已添加到 Caddyfile。${PLAIN}"
-        exit 0
+    # 检查环境是否已安装
+    if ! command -v caddy >/dev/null 2>&1 || [ ! -f "$CADDYFILE" ]; then
+        echo -e "${RED}错误：未检测到 Caddy 环境，请先执行安装（选项 1）后再添加主机。${PLAIN}"
+        return 1
     fi
 
-    if [ "$1" = "del" ]; then
-        echo -e "${BLUE}=== 删除域名 ===${PLAIN}"
+    # 域名
+    while true; do
+        read -p "请输入域名 (例: cctv.xyz): " new_domain
+        [ -n "$new_domain" ] && break
+        echo -e "${RED}域名不能为空！${PLAIN}"
+    done
 
-        echo -e "${BLUE}当前已绑定的域名：${PLAIN}"
-        grep -E '^[a-zA-Z0-9].*\{' "$CADDYFILE" | sed 's/ {//' | nl -w2 -s'. '
-        echo ""
+    # 检查是否已存在
+    if domain_exists "$new_domain"; then
+        echo -e "${RED}域名 $new_domain 已存在于 Caddyfile，请先删除后再添加。${PLAIN}"
+        return 1
+    fi
 
-        # 域名（禁止空值）
+    # 站点类型
+    choose_site_type
+
+    # 反向代理：只需要端口
+    if [ "$SITE_TYPE" = "proxy" ]; then
         while true; do
-            read -p "请输入要删除的域名 (例: cctv.xyz): " del_domain
-            [ -n "$del_domain" ] && break
-            echo -e "${RED}域名不能为空！${PLAIN}"
+            read -p "请输入转发端口 (例: 3000): " proxy_port
+            echo "$proxy_port" | grep -qE '^[0-9]+$' && break
+            echo -e "${RED}端口必须为数字！${PLAIN}"
         done
-
-        # 检查是否存在
-        if ! domain_exists "$del_domain"; then
-            echo -e "${RED}未找到域名 $del_domain，请检查拼写。${PLAIN}"
-            exit 1
-        fi
-
-        # 二次确认
-        read -p "确认删除 $del_domain ? (y/n): " confirm
-        [ "$confirm" != "y" ] && echo "已取消。" && exit 0
-
         backup_caddyfile
+        append_site_block "$new_domain" "" "proxy" "$proxy_port"
+    else
+        # 需要网站目录
+        while true; do
+            read -p "请输入网站目录 (例: /home/www/site): " new_dir
+            [ -n "$new_dir" ] && break
+            echo -e "${RED}目录不能为空！${PLAIN}"
+        done
+        mkdir -p "$new_dir"
+        chown -R www-data:www-data "$new_dir"
+        chmod -R 755 "$new_dir"
+        backup_caddyfile
+        append_site_block "$new_domain" "$new_dir" "$SITE_TYPE" ""
+    fi
 
-        # awk 安全删除：精确匹配 "domain {" 整行，逐字符计数括号深度
-        awk -v domain="$del_domain {" '
-            /^[[:space:]]*$/ { blank = blank "\n"; next }
-            $0 == domain { skip = 1; depth = 1; blank = ""; next }
-            skip {
-                for (i = 1; i <= length($0); i++) {
-                    c = substr($0, i, 1)
-                    if (c == "{") depth++
-                    if (c == "}") depth--
-                }
-                if (depth <= 0) { skip = 0; blank = "" }
-                next
+    rc-service caddy reload
+    if [ $? -ne 0 ]; then
+        echo -e "${RED}警告：Caddy reload 失败，域名配置已写入但服务未生效，请检查 Caddyfile 语法！${PLAIN}"
+        return 1
+    fi
+    echo -e "${GREEN}完成！$new_domain 已添加到 Caddyfile。${PLAIN}"
+}
+
+# ══════════════════════════════════════════════════════════════
+#  删除主机
+# ══════════════════════════════════════════════════════════════
+
+del_host() {
+    echo -e "${BLUE}=== 删除域名 ===${PLAIN}"
+
+    echo -e "${BLUE}当前已绑定的域名：${PLAIN}"
+    grep -E '^[a-zA-Z0-9].*\{' "$CADDYFILE" | sed 's/ {//' | nl -w2 -s'. '
+    echo ""
+
+    # 域名（禁止空值）
+    while true; do
+        read -p "请输入要删除的域名 (例: cctv.xyz): " del_domain
+        [ -n "$del_domain" ] && break
+        echo -e "${RED}域名不能为空！${PLAIN}"
+    done
+
+    # 检查是否存在
+    if ! domain_exists "$del_domain"; then
+        echo -e "${RED}未找到域名 $del_domain，请检查拼写。${PLAIN}"
+        return 1
+    fi
+
+    # 二次确认
+    read -p "确认删除 $del_domain ? (y/n): " confirm
+    [ "$confirm" != "y" ] && echo "已取消。" && return 0
+
+    backup_caddyfile
+
+    # awk 安全删除：精确匹配 "domain {" 整行，逐字符计数括号深度
+    awk -v domain="$del_domain {" '
+        /^[[:space:]]*$/ { blank = blank "\n"; next }
+        $0 == domain { skip = 1; depth = 1; blank = ""; next }
+        skip {
+            for (i = 1; i <= length($0); i++) {
+                c = substr($0, i, 1)
+                if (c == "{") depth++
+                if (c == "}") depth--
             }
-            { printf "%s", blank; blank = ""; print }
-        ' "$CADDYFILE" > /tmp/Caddyfile.tmp
+            if (depth <= 0) { skip = 0; blank = "" }
+            next
+        }
+        { printf "%s", blank; blank = ""; print }
+    ' "$CADDYFILE" > /tmp/Caddyfile.tmp
 
-        mv /tmp/Caddyfile.tmp "$CADDYFILE"
-        rc-service caddy reload
-        echo -e "${GREEN}完成！$del_domain 已删除。${PLAIN}"
-        exit 0
+    mv /tmp/Caddyfile.tmp "$CADDYFILE"
+    rc-service caddy reload
+    if [ $? -ne 0 ]; then
+        echo -e "${RED}警告：Caddy reload 失败，配置已修改但服务未生效，请检查 Caddyfile 语法！${PLAIN}"
+        return 1
     fi
+    echo -e "${GREEN}完成！$del_domain 已删除。${PLAIN}"
+}
 
-    if [ "$1" = "list" ]; then
-        echo -e "${BLUE}=== 当前已绑定的域名 ===${PLAIN}"
-        grep -E '^[a-zA-Z0-9].*\{' "$CADDYFILE" | sed 's/ {//' | nl -w2 -s'. '
-        exit 0
-    fi
-else
-    # 无参数或参数为 cps 时进入主菜单
-    main_menu
-fi
+# ══════════════════════════════════════════════════════════════
+#  脚本入口
+# ══════════════════════════════════════════════════════════════
+
+main_menu
