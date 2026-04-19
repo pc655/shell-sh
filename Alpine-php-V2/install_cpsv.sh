@@ -9,6 +9,7 @@ PLAIN='\033[0m'
 
 CADDYFILE=/etc/caddy/Caddyfile
 PHP_SOCK="unix//run/php-fpm82.sock"
+PHP_INI=/etc/php82/php.ini
 
 # ══════════════════════════════════════════════════════════════
 #  工具函数
@@ -267,6 +268,16 @@ install_main() {
 
     getent group www-data >/dev/null  || addgroup -g 82 www-data
     getent passwd www-data >/dev/null || adduser -D -H -u 82 -G www-data www-data
+
+    # 修改 php.ini 设置时区 (只改不删原则)
+    if [ -f "$PHP_INI" ]; then
+        echo -e "${GREEN}正在配置 PHP 时区...${PLAIN}"
+        if grep -q "^;*date.timezone =" "$PHP_INI"; then
+            sed -i "s|^;*date.timezone =.*|date.timezone = Asia/Shanghai|" "$PHP_INI"
+        else
+            echo "date.timezone = Asia/Shanghai" >> "$PHP_INI"
+        fi
+    fi
 
     cat > /etc/php82/php-fpm.d/www.conf <<EOF
 [www]
