@@ -270,13 +270,21 @@ install_main() {
     getent passwd www-data >/dev/null || adduser -D -H -u 82 -G www-data www-data
 
     # 修改 php.ini 设置时区 (只改不删原则)
-    if [ -f "$PHP_INI" ]; then
-        echo -e "${GREEN}正在配置 PHP 时区...${PLAIN}"
-        if grep -q "^;*date.timezone =" "$PHP_INI"; then
-            sed -i "s|^;*date.timezone =.*|date.timezone = Asia/Shanghai|" "$PHP_INI"
+    # Alpine 下 php82 包不自动生成 php.ini，需从模板复制后再修改
+    echo -e "${GREEN}正在配置 PHP 时区...${PLAIN}"
+    if [ ! -f "$PHP_INI" ]; then
+        if [ -f /etc/php82/php.ini-production ]; then
+            cp /etc/php82/php.ini-production "$PHP_INI"
         else
-            echo "date.timezone = Asia/Shanghai" >> "$PHP_INI"
+            # 模板均不存在时创建最小配置
+            mkdir -p /etc/php82
+            touch "$PHP_INI"
         fi
+    fi
+    if grep -q "^;*date.timezone" "$PHP_INI"; then
+        sed -i "s|^;*date.timezone.*|date.timezone = Asia/Shanghai|" "$PHP_INI"
+    else
+        echo "date.timezone = Asia/Shanghai" >> "$PHP_INI"
     fi
 
     cat > /etc/php82/php-fpm.d/www.conf <<EOF
@@ -512,22 +520,43 @@ add_host() {
 del_host() {
     echo -e "${BLUE}=== 删除域名 ===${PLAIN}"
 
-    echo -e "${BLUE}当前已绑定的域名：${PLAIN}"
-    grep -E '^[a-zA-Z0-9].*\{' "$CADDYFILE" | sed 's/ {//' | nl -w2 -s'. '
-    echo ""
-
-    # 域名（禁止空值）
-    while true; do
-        read -p "请输入要删除的域名 (例: cctv.xyz): " del_domain
-        [ -n "$del_domain" ] && break
-        echo -e "${RED}域名不能为空！${PLAIN}"
-    done
-
-    # 检查是否存在
-    if ! domain_exists "$del_domain"; then
-        echo -e "${RED}未找到域名 $del_domain，请检查拼写。${PLAIN}"
-        return 1
+    # 获取域名列表（跳过全局 { 块，只取 domain { 行）
+    domain_list=$(grep -E '^[a-zA-Z0-9].*\{' "$CADDYFILE" | sed 's/ {//')
+    if [ -z "$domain_list" ]; then
+        echo -e "${YELLOW}Caddyfile 中暂无绑定域名。${PLAIN}"
+        return 0
     fi
+
+    echo -e "${BLUE}当前已绑定的域名：${PLAIN}"
+    echo "$domain_list" | nl -w2 -s'. '
+    echo ""
+    echo -e "${YELLOW}提示：输入序号或域名删除，直接回车返回上级菜单${PLAIN}"
+
+    while true; do
+        read -p "请输入序号或域名: " del_input
+
+        # 空输入 → 返回上级
+        [ -z "$del_input" ] && return 0
+
+        # 判断是序号还是域名
+        if echo "$del_input" | grep -qE '^[0-9]+$'; then
+            del_domain=$(echo "$domain_list" | sed -n "${del_input}p")
+            if [ -z "$del_domain" ]; then
+                echo -e "${RED}序号 $del_input 不存在，请重新输入${PLAIN}"
+                continue
+            fi
+        else
+            del_domain="$del_input"
+        fi
+
+        # 检查是否存在
+        if ! domain_exists "$del_domain"; then
+            echo -e "${RED}未找到域名 $del_domain，请重新输入${PLAIN}"
+            continue
+        fi
+
+        break
+    done
 
     # 二次确认
     read -p "确认删除 $del_domain ? (y/n): " confirm
