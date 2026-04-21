@@ -6,7 +6,6 @@
 # =====================================================
 
 AGENT_PATH="/root/agent.sh"
-TRAFFIC_FILE="/etc/agent_traffic.dat"
 LOG_PATH="/var/log/agent.log"
 INIT_SCRIPT="/etc/init.d/probe-agent"
 
@@ -69,7 +68,6 @@ generate_agent() {
 ID="${INPUT_ID}"
 INTERVAL=${INPUT_INTERVAL}
 REGION="${INPUT_REGION}"
-TRAFFIC_FILE="${TRAFFIC_FILE}"
 SERVER_TOKEN="${S_TOKEN}"
 EOF
 
@@ -144,36 +142,8 @@ while true; do
     D_TOTAL=$(echo "$D_INFO" | awk '{print $2}')
     D_USED=$(echo  "$D_INFO" | awk '{print $3}')
 
-    # 流量计账（跨月自动归零；兼容 BusyBox 的 read 不支持 -r 的情况）
-    CUR_MONTH=$(date +%Y%m)
-    RAW_NET=$(awk '/: /{gsub(/:/, " "); if ($1 != "lo") { rx += $2; tx += $10 }} END { print rx","tx }' /proc/net/dev)
-    cur_rx_p=$(echo "$RAW_NET" | cut -d',' -f1)
-    cur_tx_p=$(echo "$RAW_NET" | cut -d',' -f2)
-
-    if [ -f "$TRAFFIC_FILE" ]; then
-        # BusyBox ash 不保证支持 "IFS=',' read -r"，改用 cut 解析
-        s_m=$(cut -d',' -f1 "$TRAFFIC_FILE")
-        s_rx_p=$(cut -d',' -f2 "$TRAFFIC_FILE")
-        s_tx_p=$(cut -d',' -f3 "$TRAFFIC_FILE")
-        s_rx_t=$(cut -d',' -f4 "$TRAFFIC_FILE")
-        s_tx_t=$(cut -d',' -f5 "$TRAFFIC_FILE")
-    else
-        s_m=$CUR_MONTH; s_rx_p=$cur_rx_p; s_tx_p=$cur_tx_p; s_rx_t=0; s_tx_t=0
-    fi
-
-    # 跨月重置
-    if [ "$CUR_MONTH" != "$s_m" ]; then
-        s_rx_t=0; s_tx_t=0; s_m=$CUR_MONTH
-    fi
-
-    # 计数器回绕保护
-    [ "$cur_rx_p" -lt "$s_rx_p" ] && d_rx=$cur_rx_p || d_rx=$((cur_rx_p - s_rx_p))
-    [ "$cur_tx_p" -lt "$s_tx_p" ] && d_tx=$cur_tx_p || d_tx=$((cur_tx_p - s_tx_p))
-
-    acc_rx=$((s_rx_t + d_rx))
-    acc_tx=$((s_tx_t + d_tx))
-    printf '%s,%s,%s,%s,%s\n' "$s_m" "$cur_rx_p" "$cur_tx_p" "$acc_rx" "$acc_tx" > "$TRAFFIC_FILE"
-    NET_REPORT="${acc_rx},${acc_tx}"
+    # 流量：上报网卡原始累计值（与 X86 Agent 一致，服务端计算增量）
+    NET_REPORT=$(awk '/: /{gsub(/:/, " "); if ($1 != "lo") { rx += $2; tx += $10 }} END { print rx","tx }' /proc/net/dev)
 
     # 进程数（BusyBox ps 无 -e 参数，用 -w 或直接 ps）
     PROCESS_COUNT=$(ps 2>/dev/null | wc -l)
