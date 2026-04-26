@@ -2,7 +2,7 @@
 # =============================================
 # install_agent.sh - 监控 Agent 安装脚本
 # 支持：Alpine Linux / Debian (及衍生系统)
-# 用法：sh install_agent.sh [--id 节点ID]
+# 用法：curl -L URL | sh -s -- --id 节点ID
 # =============================================
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
@@ -17,6 +17,12 @@ title()   { printf "\n${BOLD}${CYAN}==> %s${NC}\n" "$*"; }
 AGENT_FILE="/usr/local/bin/agent.sh"
 PID_FILE="/var/run/agent_monitor.pid"
 LOG_FILE="/var/log/agent_monitor.log"
+
+# 全局变量
+NODE_ID=""
+NODE_REGION=""
+FINAL_NIC=""
+SERVERS_CONF=""
 
 # ---------- 命令行参数 ----------
 CMD_ID=""
@@ -47,7 +53,6 @@ detect_os() {
     for cmd in curl awk grep ps df; do
         command -v "$cmd" >/dev/null 2>&1 || NEED="$NEED $cmd"
     done
-
     if [ -n "$NEED" ]; then
         info "安装缺少的依赖：$NEED"
         case "$SYS_TYPE" in
@@ -60,7 +65,7 @@ detect_os() {
 }
 
 # =============================================
-# 2. 检测主网卡（流量排序，用户确认）
+# 2. 检测主网卡
 # =============================================
 detect_nic() {
     title "检测网卡"
@@ -73,9 +78,7 @@ detect_nic() {
 
     NIC_COUNT=$(echo "$CANDIDATES" | grep -c .)
 
-    if [ "$NIC_COUNT" -eq 0 ]; then
-        error "未检测到有效网卡"
-    fi
+    [ "$NIC_COUNT" -eq 0 ] && error "未检测到有效网卡"
 
     if [ "$NIC_COUNT" -eq 1 ]; then
         FINAL_NIC=$(echo "$CANDIDATES" | head -n 1)
@@ -85,12 +88,10 @@ detect_nic() {
 
     info "检测到多块网卡，按累计流量排序："
     printf "\n"
-    _idx=0
     for _nic in $CANDIDATES; do
         _rx=$(awk -v n="${_nic}:" '$0 ~ n {gsub(/:/, " "); print $2; exit}' /proc/net/dev)
         _tx=$(awk -v n="${_nic}:" '$0 ~ n {gsub(/:/, " "); print $10; exit}' /proc/net/dev)
-        _idx=$((_idx + 1))
-        printf "  ${BOLD}%d)${NC} %-12s  RX:%-14d TX:%-14d\n" "$_idx" "$_nic" "${_rx:-0}" "${_tx:-0}"
+        printf "  %-12s  RX:%-14d TX:%-14d\n" "$_nic" "${_rx:-0}" "${_tx:-0}"
     done
     printf "\n"
 
@@ -104,7 +105,7 @@ detect_nic() {
 
     printf "推荐网卡（流量最大）：${GREEN}${BOLD}%s${NC}\n\n" "$RECOMMEND_NIC"
     printf "请输入网卡名称 [默认 %s]: " "$RECOMMEND_NIC"
-    read INPUT_NIC
+    read INPUT_NIC < /dev/tty
     FINAL_NIC="${INPUT_NIC:-$RECOMMEND_NIC}"
     ok "使用网卡：$FINAL_NIC"
 }
@@ -115,15 +116,14 @@ detect_nic() {
 input_config() {
     title "配置节点信息"
 
-    # 节点 ID（优先命令行参数）
+    # 节点 ID
     if [ -n "$CMD_ID" ]; then
         NODE_ID="$CMD_ID"
         ok "节点 ID：$NODE_ID"
     else
         printf "节点 ID（如 HK-01-1T）: "
-        read INPUT_ID
-        [ -z "$INPUT_ID" ] && error "ID 不能为空"
-        NODE_ID="$INPUT_ID"
+        read NODE_ID < /dev/tty
+        [ -z "$NODE_ID" ] && error "ID 不能为空"
     fi
 
     # 自动查地区
@@ -144,7 +144,7 @@ input_config() {
     while true; do
         _scount=$((_scount + 1))
         printf "推送端 $_scount（空行结束）: "
-        read _srv
+        read _srv < /dev/tty
         [ -z "$_srv" ] && break
 
         _check_url=$(echo "$_srv" | cut -d'|' -f1)
@@ -344,7 +344,7 @@ print_summary() {
     printf "\n"
     printf "  ${BOLD}常用命令：${NC}\n"
     printf "  停止:   kill \$(cat %s)\n" "$PID_FILE"
-    printf "  重启:   sh %s\n"          "$0"
+    printf "  重启:   sh %s\n"          "$AGENT_FILE"
     printf "  日志:   tail -f %s\n"     "$LOG_FILE"
     printf "  调试:   sh %s\n"          "$AGENT_FILE"
     printf "\n"
