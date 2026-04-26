@@ -1,0 +1,365 @@
+#!/bin/sh
+# =============================================
+# install_agent.sh - 监控 Agent 安装脚本
+# 支持：Alpine Linux / Debian (及衍生系统)
+# 用法：sh install_agent.sh [--id 节点ID]
+# =============================================
+
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
+CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
+
+info()    { printf "${CYAN}[INFO]${NC}  %s\n" "$*"; }
+ok()      { printf "${GREEN}[OK]${NC}    %s\n" "$*"; }
+warn()    { printf "${YELLOW}[WARN]${NC}  %s\n" "$*"; }
+error()   { printf "${RED}[ERROR]${NC} %s\n" "$*"; exit 1; }
+title()   { printf "\n${BOLD}${CYAN}==> %s${NC}\n" "$*"; }
+
+AGENT_FILE="/usr/local/bin/agent.sh"
+PID_FILE="/var/run/agent_monitor.pid"
+LOG_FILE="/var/log/agent_monitor.log"
+
+# ---------- 命令行参数 ----------
+CMD_ID=""
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --id) CMD_ID="$2"; shift 2 ;;
+        *) shift ;;
+    esac
+done
+
+# =============================================
+# 1. 检测系统 + 自动安装依赖
+# =============================================
+detect_os() {
+    title "检测系统环境"
+    if [ -f /etc/alpine-release ]; then
+        SYS_TYPE="alpine"
+        ok "Alpine Linux $(cat /etc/alpine-release)"
+    elif [ -f /etc/debian_version ]; then
+        SYS_TYPE="debian"
+        ok "Debian/Ubuntu $(cat /etc/debian_version)"
+    else
+        SYS_TYPE="other"
+        warn "未识别系统，将按通用 sh 处理"
+    fi
+
+    NEED=""
+    for cmd in curl awk grep ps df; do
+        command -v "$cmd" >/dev/null 2>&1 || NEED="$NEED $cmd"
+    done
+
+    if [ -n "$NEED" ]; then
+        info "安装缺少的依赖：$NEED"
+        case "$SYS_TYPE" in
+            alpine) apk update -q && apk add -q curl || error "apk 安装失败" ;;
+            debian) apt-get update -qq && apt-get install -y -qq curl gawk || error "apt 安装失败" ;;
+            *)      error "请手动安装：$NEED" ;;
+        esac
+    fi
+    ok "依赖检查通过"
+}
+
+# =============================================
+# 2. 检测主网卡（流量排序，用户确认）
+# =============================================
+detect_nic() {
+    title "检测网卡"
+
+    CANDIDATES=$(awk 'NR>2 {
+        gsub(/:/, "", $1)
+        if ($1 !~ /^(lo|docker|veth|br-|virbr|tun|tap|dummy|bond|sit|flannel|cni|kube)/)
+            print $1
+    }' /proc/net/dev)
+
+    NIC_COUNT=$(echo "$CANDIDATES" | grep -c .)
+
+    if [ "$NIC_COUNT" -eq 0 ]; then
+        error "未检测到有效网卡"
+    fi
+
+    if [ "$NIC_COUNT" -eq 1 ]; then
+        FINAL_NIC=$(echo "$CANDIDATES" | head -n 1)
+        ok "自动选定网卡：$FINAL_NIC"
+        return
+    fi
+
+    info "检测到多块网卡，按累计流量排序："
+    printf "\n"
+    _idx=0
+    for _nic in $CANDIDATES; do
+        _rx=$(awk -v n="${_nic}:" '$0 ~ n {gsub(/:/, " "); print $2; exit}' /proc/net/dev)
+        _tx=$(awk -v n="${_nic}:" '$0 ~ n {gsub(/:/, " "); print $10; exit}' /proc/net/dev)
+        _idx=$((_idx + 1))
+        printf "  ${BOLD}%d)${NC} %-12s  RX:%-14d TX:%-14d\n" "$_idx" "$_nic" "${_rx:-0}" "${_tx:-0}"
+    done
+    printf "\n"
+
+    RECOMMEND_NIC=$(awk 'NR>2 {
+        gsub(/:/, " ")
+        if ($1 !~ /^(lo|docker|veth|br-|virbr|tun|tap|dummy|bond|sit|flannel|cni|kube)/) {
+            total = $2 + $10
+            if (total > max) { max = total; nic = $1 }
+        }
+    } END { print nic }' /proc/net/dev)
+
+    printf "推荐网卡（流量最大）：${GREEN}${BOLD}%s${NC}\n\n" "$RECOMMEND_NIC"
+    printf "请输入网卡名称 [默认 %s]: " "$RECOMMEND_NIC"
+    read INPUT_NIC
+    FINAL_NIC="${INPUT_NIC:-$RECOMMEND_NIC}"
+    ok "使用网卡：$FINAL_NIC"
+}
+
+# =============================================
+# 3. 交互输入配置
+# =============================================
+input_config() {
+    title "配置节点信息"
+
+    # 节点 ID（优先命令行参数）
+    if [ -n "$CMD_ID" ]; then
+        NODE_ID="$CMD_ID"
+        ok "节点 ID：$NODE_ID"
+    else
+        printf "节点 ID（如 HK-01-1T）: "
+        read INPUT_ID
+        [ -z "$INPUT_ID" ] && error "ID 不能为空"
+        NODE_ID="$INPUT_ID"
+    fi
+
+    # 自动查地区
+    info "正在查询节点地区..."
+    NODE_REGION=$(curl -sk --max-time 5 "http://ip-api.com/json/?lang=zh-CN" \
+        | sed -n 's/.*"country":"\([^"]*\)".*/\1/p')
+    [ -z "$NODE_REGION" ] && NODE_REGION="未知地区"
+    ok "自动识别地区：$NODE_REGION"
+
+    # SERVERS 多端配置
+    title "配置推送端（格式：URL|TOKEN|INTERVAL）"
+    info "每行一个，输入空行结束"
+    info "示例：https://vps.example.com/push.php|abc123token|2"
+    printf "\n"
+
+    SERVERS_CONF=""
+    _scount=0
+    while true; do
+        _scount=$((_scount + 1))
+        printf "推送端 $_scount（空行结束）: "
+        read _srv
+        [ -z "$_srv" ] && break
+
+        _check_url=$(echo "$_srv" | cut -d'|' -f1)
+        _check_tok=$(echo "$_srv" | cut -d'|' -f2)
+        _check_iv=$(echo "$_srv"  | cut -d'|' -f3)
+
+        if [ -z "$_check_url" ] || [ -z "$_check_tok" ] || [ -z "$_check_iv" ]; then
+            warn "格式不对，请用：URL|TOKEN|INTERVAL"
+            _scount=$((_scount - 1))
+            continue
+        fi
+
+        if [ -z "$SERVERS_CONF" ]; then
+            SERVERS_CONF="$_srv"
+        else
+            SERVERS_CONF="${SERVERS_CONF}
+         ${_srv}"
+        fi
+        ok "已添加：$_check_url"
+    done
+
+    [ -z "$SERVERS_CONF" ] && error "至少需要配置一个推送端"
+    ok "共配置 $((_scount - 1)) 个推送端"
+}
+
+# =============================================
+# 4. 生成 agent.sh
+# =============================================
+generate_agent() {
+    title "生成 agent.sh"
+
+    cat > "$AGENT_FILE" << AGENT_EOF
+#!/bin/sh
+# =============================================
+# agent.sh - 服务器监控推送脚本
+# 由 install_agent.sh 自动生成，请勿手动修改
+# 生成时间：$(date '+%Y-%m-%d %H:%M:%S')
+# =============================================
+ID="${NODE_ID}"
+REGION="${NODE_REGION}"
+NIC="${FINAL_NIC}"
+MAX_RETRY=3
+
+SERVERS="${SERVERS_CONF}"
+
+ARCH=\$(uname -m)
+[ -f /etc/os-release ] && OS=\$(grep "^PRETTY_NAME=" /etc/os-release | cut -d'=' -f2- | tr -d '"') || OS=\$(uname -s)
+CPU_NAME=\$(grep "model name" /proc/cpuinfo | head -n 1 | cut -d':' -f2 | sed 's/^[ \t]*//')
+[ -z "\$CPU_NAME" ] && CPU_NAME="\$ARCH"
+
+get_cpu_stats() {
+    _retry=0
+    while [ \$_retry -lt \$MAX_RETRY ]; do
+        _stats=\$(grep '^cpu ' /proc/stat | awk '{print \$2" "\$3" "\$4" "\$5" "\$6" "\$7" "\$8}')
+        [ -n "\$_stats" ] && echo "\$_stats" && return 0
+        _retry=\$((\$_retry + 1))
+        sleep 1
+    done
+    echo "0 0 0 0 0 0 0"
+}
+
+get_net_stats() {
+    _retry=0
+    while [ \$_retry -lt \$MAX_RETRY ]; do
+        _nic_data=\$(awk -v nic="\${NIC}:" '\$0 ~ nic {gsub(/:/, " "); print \$2,\$10; exit}' /proc/net/dev)
+        if [ -n "\$_nic_data" ]; then
+            echo "\$_nic_data"
+            return 0
+        fi
+        _retry=\$((\$_retry + 1))
+        sleep 1
+    done
+    echo "0 0"
+}
+
+_count=0
+for _s in \$SERVERS; do
+    _count=\$((\$_count + 1))
+    eval "LAST_PUSH_\$_count=0"
+done
+
+PREV_STATS=\$(get_cpu_stats)
+[ -t 1 ] && DEBUG=1 || DEBUG=0
+
+while true; do
+    sleep 1
+    NOW=\$(awk '{print int(\$1)}' /proc/uptime)
+
+    CURR_STATS=\$(get_cpu_stats)
+    set -- \$PREV_STATS; p_u=\$1 p_n=\$2 p_s=\$3 p_i=\$4 p_io=\$5 p_ir=\$6 p_so=\$7
+    set -- \$CURR_STATS; c_u=\$1 c_n=\$2 c_s=\$3 c_i=\$4 c_io=\$5 c_ir=\$6 c_so=\$7
+    total=\$(( (c_u-p_u)+(c_n-p_n)+(c_s-p_s)+(c_i-p_i)+(c_io-p_io)+(c_ir-p_ir)+(c_so-p_so) ))
+    if [ "\$total" -gt 0 ]; then
+        pc=\$(( (total - (c_i-p_i)) * 100 / total ))
+        [ "\$pc" -gt 100 ] && pc=100
+        if   [ "\$pc" -ge 100 ]; then CPU_USAGE="1.00"
+        elif [ "\$pc" -lt 10  ]; then CPU_USAGE="0.0\${pc}"
+        else                          CPU_USAGE="0.\${pc}"
+        fi
+    else
+        CPU_USAGE="0.00"
+    fi
+    PREV_STATS=\$CURR_STATS
+
+    M_TOTAL=\$(awk '/^MemTotal:/{print int(\$2/1024)}' /proc/meminfo)
+    M_AVAIL=\$(awk '/^MemAvailable:/{print int(\$2/1024)}' /proc/meminfo)
+    M_USED=\$((M_TOTAL - M_AVAIL))
+    [ "\$M_USED" -lt 0 ] && M_USED=0
+
+    UPTIME=\$(awk '{print int(\$1)}' /proc/uptime)
+
+    D_INFO=\$(df -Pm / | tail -n 1)
+    D_TOTAL=\$(echo "\$D_INFO" | awk '{print \$2}')
+    D_USED=\$(echo "\$D_INFO"  | awk '{print \$3}')
+
+    NET_STATS=\$(get_net_stats)
+    NET_RX=\$(echo "\$NET_STATS" | awk '{print \$1}')
+    NET_TX=\$(echo "\$NET_STATS" | awk '{print \$2}')
+    NET_REPORT="\${NET_RX},\${NET_TX}"
+
+    PROCESS_COUNT=\$(ps -ef | wc -l)
+    TCP_CONN=\$(grep -v "local_address" /proc/net/tcp /proc/net/tcp6 2>/dev/null | wc -l)
+    UDP_CONN=\$(grep -v "local_address" /proc/net/udp /proc/net/udp6 2>/dev/null | wc -l)
+
+    BASE_DATA="id=\${ID}&uptime=\${UPTIME}&load=\${CPU_USAGE}&mem=\${M_TOTAL},\${M_USED}&disk=\${D_TOTAL},\${D_USED}&net=\${NET_REPORT}&process=\${PROCESS_COUNT}&tcp=\${TCP_CONN}&udp=\${UDP_CONN}&arch=\${ARCH}&os=\${OS}&region=\${REGION}&cpu_name=\${CPU_NAME}"
+
+    _idx=0
+    for _item in \$SERVERS; do
+        _idx=\$((\$_idx + 1))
+        _url=\$(echo "\$_item"   | cut -d'|' -f1)
+        _token=\$(echo "\$_item" | cut -d'|' -f2)
+        _iv=\$(echo "\$_item"    | cut -d'|' -f3)
+        eval "_last=\\\$LAST_PUSH_\$_idx"
+
+        if [ "\$(( NOW - _last ))" -ge "\$_iv" ]; then
+            POST_DATA="token=\${_token}&\${BASE_DATA}"
+            if [ "\$DEBUG" -eq 1 ]; then
+                echo "[\$(date '+%H:%M:%S')] 推送[\$_idx] \$_url  Token:\${_token%\${_token#????}}****"
+                echo "[\$(date '+%H:%M:%S')] NIC:\$NIC  RX:\${NET_RX}B  TX:\${NET_TX}B  CPU:\${CPU_USAGE}  MEM:\${M_USED}/\${M_TOTAL}MB"
+            fi
+            curl -sk --max-time 5 -X POST "\$_url" -d "\$POST_DATA" >/dev/null 2>&1
+            eval "LAST_PUSH_\$_idx=\$NOW"
+        fi
+    done
+done
+AGENT_EOF
+
+    chmod +x "$AGENT_FILE"
+    ok "已生成：$AGENT_FILE"
+}
+
+# =============================================
+# 5. 停止旧进程
+# =============================================
+stop_old() {
+    if [ -f "$PID_FILE" ]; then
+        OLD_PID=$(cat "$PID_FILE")
+        if kill -0 "$OLD_PID" 2>/dev/null; then
+            info "停止旧进程 (PID: $OLD_PID)"
+            kill "$OLD_PID" 2>/dev/null
+            sleep 1
+        fi
+        rm -f "$PID_FILE"
+    fi
+    OLD=$(pgrep -f "agent.sh" 2>/dev/null)
+    [ -n "$OLD" ] && kill $OLD 2>/dev/null && sleep 1
+}
+
+# =============================================
+# 6. 后台启动（nohup）
+# =============================================
+start_agent() {
+    title "启动 agent"
+    stop_old
+    nohup sh "$AGENT_FILE" >> "$LOG_FILE" 2>&1 &
+    echo $! > "$PID_FILE"
+    sleep 1
+    if kill -0 "$(cat $PID_FILE)" 2>/dev/null; then
+        ok "启动成功，PID: $(cat $PID_FILE)"
+    else
+        error "启动失败，请查看日志：$LOG_FILE"
+    fi
+}
+
+# =============================================
+# 7. 打印摘要
+# =============================================
+print_summary() {
+    title "安装完成"
+    printf "\n"
+    printf "  ${BOLD}节点 ID   :${NC} %s\n" "$NODE_ID"
+    printf "  ${BOLD}区域      :${NC} %s\n" "$NODE_REGION"
+    printf "  ${BOLD}网卡      :${NC} %s\n" "$FINAL_NIC"
+    printf "  ${BOLD}脚本路径  :${NC} %s\n" "$AGENT_FILE"
+    printf "  ${BOLD}PID 文件  :${NC} %s\n" "$PID_FILE"
+    printf "  ${BOLD}日志文件  :${NC} %s\n" "$LOG_FILE"
+    printf "\n"
+    printf "  ${BOLD}常用命令：${NC}\n"
+    printf "  停止:   kill \$(cat %s)\n" "$PID_FILE"
+    printf "  重启:   sh %s\n"          "$0"
+    printf "  日志:   tail -f %s\n"     "$LOG_FILE"
+    printf "  调试:   sh %s\n"          "$AGENT_FILE"
+    printf "\n"
+}
+
+# =============================================
+# 主流程
+# =============================================
+printf "\n${BOLD}${CYAN}========================================${NC}\n"
+printf "${BOLD}${CYAN}   监控 Agent 安装脚本${NC}\n"
+printf "${BOLD}${CYAN}========================================${NC}\n\n"
+
+detect_os
+detect_nic
+input_config
+generate_agent
+start_agent
+print_summary
