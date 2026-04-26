@@ -1,37 +1,49 @@
 #!/bin/sh
 # =============================================
 # install_agent.sh - 监控 Agent 安装脚本
-# 支持：Alpine Linux / Debian (及衍生系统)
-# 用法：curl -L URL | sh -s -- --id 节点ID
+# 用法：curl -L URL | sh -s -- --id ID --token TOKEN --api URL
 # =============================================
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
 CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
 
-info()    { printf "${CYAN}[INFO]${NC}  %s\n" "$*"; }
-ok()      { printf "${GREEN}[OK]${NC}    %s\n" "$*"; }
-warn()    { printf "${YELLOW}[WARN]${NC}  %s\n" "$*"; }
-error()   { printf "${RED}[ERROR]${NC} %s\n" "$*"; exit 1; }
-title()   { printf "\n${BOLD}${CYAN}==> %s${NC}\n" "$*"; }
+info()  { printf "${CYAN}[INFO]${NC}  %s\n" "$*"; }
+ok()    { printf "${GREEN}[OK]${NC}    %s\n" "$*"; }
+warn()  { printf "${YELLOW}[WARN]${NC}  %s\n" "$*"; }
+error() { printf "${RED}[ERROR]${NC} %s\n" "$*"; exit 1; }
+title() { printf "\n${BOLD}${CYAN}==> %s${NC}\n" "$*"; }
 
 AGENT_FILE="/usr/local/bin/agent.sh"
 PID_FILE="/var/run/agent_monitor.pid"
 LOG_FILE="/var/log/agent_monitor.log"
 
-# 全局变量
+# ---------- 命令行参数解析 ----------
 NODE_ID=""
-NODE_REGION=""
-FINAL_NIC=""
-SERVERS_CONF=""
+S_TOKEN=""
+S_API=""
 
-# ---------- 命令行参数 ----------
-CMD_ID=""
 while [ "$#" -gt 0 ]; do
     case "$1" in
-        --id) CMD_ID="$2"; shift 2 ;;
+        --id)    NODE_ID="$2";  shift 2 ;;
+        --token) S_TOKEN="$2";  shift 2 ;;
+        --api)   S_API="$2";    shift 2 ;;
         *) shift ;;
     esac
 done
+
+[ -z "$NODE_ID" ] && error "--id 不能为空"
+[ -z "$S_TOKEN" ] && error "--token 不能为空"
+[ -z "$S_API"   ] && error "--api 不能为空"
+
+# 拼接推送 URL
+_base=$(echo "$S_API" | sed 's|/*$||')
+case "$_base" in
+    *workers.dev*) PUSH_URL="${_base}/push" ;;
+    *)             PUSH_URL="${_base}/push.php" ;;
+esac
+
+# SERVERS 格式：URL|TOKEN|INTERVAL
+SERVERS_CONF="${PUSH_URL}|${S_TOKEN}|2"
 
 # =============================================
 # 1. 检测系统 + 自动安装依赖
@@ -39,14 +51,11 @@ done
 detect_os() {
     title "检测系统环境"
     if [ -f /etc/alpine-release ]; then
-        SYS_TYPE="alpine"
-        ok "Alpine Linux $(cat /etc/alpine-release)"
+        SYS_TYPE="alpine"; ok "Alpine Linux $(cat /etc/alpine-release)"
     elif [ -f /etc/debian_version ]; then
-        SYS_TYPE="debian"
-        ok "Debian/Ubuntu $(cat /etc/debian_version)"
+        SYS_TYPE="debian"; ok "Debian/Ubuntu $(cat /etc/debian_version)"
     else
-        SYS_TYPE="other"
-        warn "未识别系统，将按通用 sh 处理"
+        SYS_TYPE="other"; warn "未识别系统，将按通用 sh 处理"
     fi
 
     NEED=""
@@ -65,7 +74,18 @@ detect_os() {
 }
 
 # =============================================
-# 2. 检测主网卡
+# 2. 自动查地区
+# =============================================
+detect_region() {
+    title "查询节点地区"
+    NODE_REGION=$(curl -sk --max-time 5 "http://ip-api.com/json/?lang=zh-CN" \
+        | sed -n 's/.*"country":"\([^"]*\)".*/\1/p')
+    [ -z "$NODE_REGION" ] && NODE_REGION="未知地区"
+    ok "自动识别地区：$NODE_REGION"
+}
+
+# =============================================
+# 3. 检测主网卡
 # =============================================
 detect_nic() {
     title "检测网卡"
@@ -77,7 +97,6 @@ detect_nic() {
     }' /proc/net/dev)
 
     NIC_COUNT=$(echo "$CANDIDATES" | grep -c .)
-
     [ "$NIC_COUNT" -eq 0 ] && error "未检测到有效网卡"
 
     if [ "$NIC_COUNT" -eq 1 ]; then
@@ -95,7 +114,7 @@ detect_nic() {
     done
     printf "\n"
 
-    RECOMMEND_NIC=$(awk 'NR>2 {
+    FINAL_NIC=$(awk 'NR>2 {
         gsub(/:/, " ")
         if ($1 !~ /^(lo|docker|veth|br-|virbr|tun|tap|dummy|bond|sit|flannel|cni|kube)/) {
             total = $2 + $10
@@ -103,71 +122,7 @@ detect_nic() {
         }
     } END { print nic }' /proc/net/dev)
 
-    printf "推荐网卡（流量最大）：${GREEN}${BOLD}%s${NC}\n\n" "$RECOMMEND_NIC"
-    printf "请输入网卡名称 [默认 %s]: " "$RECOMMEND_NIC"
-    read INPUT_NIC < /dev/tty
-    FINAL_NIC="${INPUT_NIC:-$RECOMMEND_NIC}"
-    ok "使用网卡：$FINAL_NIC"
-}
-
-# =============================================
-# 3. 交互输入配置
-# =============================================
-input_config() {
-    title "配置节点信息"
-
-    # 节点 ID
-    if [ -n "$CMD_ID" ]; then
-        NODE_ID="$CMD_ID"
-        ok "节点 ID：$NODE_ID"
-    else
-        printf "节点 ID（如 HK-01-1T）: "
-        read NODE_ID < /dev/tty
-        [ -z "$NODE_ID" ] && error "ID 不能为空"
-    fi
-
-    # 自动查地区
-    info "正在查询节点地区..."
-    NODE_REGION=$(curl -sk --max-time 5 "http://ip-api.com/json/?lang=zh-CN" \
-        | sed -n 's/.*"country":"\([^"]*\)".*/\1/p')
-    [ -z "$NODE_REGION" ] && NODE_REGION="未知地区"
-    ok "自动识别地区：$NODE_REGION"
-
-    # SERVERS 多端配置
-    title "配置推送端（格式：URL|TOKEN|INTERVAL）"
-    info "每行一个，输入空行结束"
-    info "示例：https://vps.example.com/push.php|abc123token|2"
-    printf "\n"
-
-    SERVERS_CONF=""
-    _scount=0
-    while true; do
-        _scount=$((_scount + 1))
-        printf "推送端 $_scount（空行结束）: "
-        read _srv < /dev/tty
-        [ -z "$_srv" ] && break
-
-        _check_url=$(echo "$_srv" | cut -d'|' -f1)
-        _check_tok=$(echo "$_srv" | cut -d'|' -f2)
-        _check_iv=$(echo "$_srv"  | cut -d'|' -f3)
-
-        if [ -z "$_check_url" ] || [ -z "$_check_tok" ] || [ -z "$_check_iv" ]; then
-            warn "格式不对，请用：URL|TOKEN|INTERVAL"
-            _scount=$((_scount - 1))
-            continue
-        fi
-
-        if [ -z "$SERVERS_CONF" ]; then
-            SERVERS_CONF="$_srv"
-        else
-            SERVERS_CONF="${SERVERS_CONF}
-         ${_srv}"
-        fi
-        ok "已添加：$_check_url"
-    done
-
-    [ -z "$SERVERS_CONF" ] && error "至少需要配置一个推送端"
-    ok "共配置 $((_scount - 1)) 个推送端"
+    ok "自动选定网卡（流量最大）：$FINAL_NIC"
 }
 
 # =============================================
@@ -175,19 +130,15 @@ input_config() {
 # =============================================
 generate_agent() {
     title "生成 agent.sh"
+    mkdir -p "$(dirname $AGENT_FILE)"
 
     cat > "$AGENT_FILE" << AGENT_EOF
 #!/bin/sh
-# =============================================
-# agent.sh - 服务器监控推送脚本
-# 由 install_agent.sh 自动生成，请勿手动修改
-# 生成时间：$(date '+%Y-%m-%d %H:%M:%S')
-# =============================================
+# 由 install_agent.sh 自动生成 $(date '+%Y-%m-%d %H:%M:%S')
 ID="${NODE_ID}"
 REGION="${NODE_REGION}"
 NIC="${FINAL_NIC}"
 MAX_RETRY=3
-
 SERVERS="${SERVERS_CONF}"
 
 ARCH=\$(uname -m)
@@ -253,9 +204,7 @@ while true; do
     M_AVAIL=\$(awk '/^MemAvailable:/{print int(\$2/1024)}' /proc/meminfo)
     M_USED=\$((M_TOTAL - M_AVAIL))
     [ "\$M_USED" -lt 0 ] && M_USED=0
-
     UPTIME=\$(awk '{print int(\$1)}' /proc/uptime)
-
     D_INFO=\$(df -Pm / | tail -n 1)
     D_TOTAL=\$(echo "\$D_INFO" | awk '{print \$2}')
     D_USED=\$(echo "\$D_INFO"  | awk '{print \$3}')
@@ -278,11 +227,10 @@ while true; do
         _token=\$(echo "\$_item" | cut -d'|' -f2)
         _iv=\$(echo "\$_item"    | cut -d'|' -f3)
         eval "_last=\\\$LAST_PUSH_\$_idx"
-
         if [ "\$(( NOW - _last ))" -ge "\$_iv" ]; then
             POST_DATA="token=\${_token}&\${BASE_DATA}"
             if [ "\$DEBUG" -eq 1 ]; then
-                echo "[\$(date '+%H:%M:%S')] 推送[\$_idx] \$_url  Token:\${_token%\${_token#????}}****"
+                echo "[\$(date '+%H:%M:%S')] 推送[\$_idx] \$_url"
                 echo "[\$(date '+%H:%M:%S')] NIC:\$NIC  RX:\${NET_RX}B  TX:\${NET_TX}B  CPU:\${CPU_USAGE}  MEM:\${M_USED}/\${M_TOTAL}MB"
             fi
             curl -sk --max-time 5 -X POST "\$_url" -d "\$POST_DATA" >/dev/null 2>&1
@@ -314,16 +262,17 @@ stop_old() {
 }
 
 # =============================================
-# 6. 后台启动（nohup）
+# 6. 后台启动
 # =============================================
 start_agent() {
     title "启动 agent"
     stop_old
     nohup sh "$AGENT_FILE" >> "$LOG_FILE" 2>&1 &
-    echo $! > "$PID_FILE"
+    AGENT_PID=$!
+    echo $AGENT_PID > "$PID_FILE"
     sleep 1
-    if kill -0 "$(cat $PID_FILE)" 2>/dev/null; then
-        ok "启动成功，PID: $(cat $PID_FILE)"
+    if kill -0 $AGENT_PID 2>/dev/null; then
+        ok "启动成功，PID: $AGENT_PID"
     else
         error "启动失败，请查看日志：$LOG_FILE"
     fi
@@ -338,13 +287,12 @@ print_summary() {
     printf "  ${BOLD}节点 ID   :${NC} %s\n" "$NODE_ID"
     printf "  ${BOLD}区域      :${NC} %s\n" "$NODE_REGION"
     printf "  ${BOLD}网卡      :${NC} %s\n" "$FINAL_NIC"
+    printf "  ${BOLD}推送地址  :${NC} %s\n" "$PUSH_URL"
     printf "  ${BOLD}脚本路径  :${NC} %s\n" "$AGENT_FILE"
-    printf "  ${BOLD}PID 文件  :${NC} %s\n" "$PID_FILE"
     printf "  ${BOLD}日志文件  :${NC} %s\n" "$LOG_FILE"
     printf "\n"
     printf "  ${BOLD}常用命令：${NC}\n"
     printf "  停止:   kill \$(cat %s)\n" "$PID_FILE"
-    printf "  重启:   sh %s\n"          "$AGENT_FILE"
     printf "  日志:   tail -f %s\n"     "$LOG_FILE"
     printf "  调试:   sh %s\n"          "$AGENT_FILE"
     printf "\n"
@@ -358,8 +306,8 @@ printf "${BOLD}${CYAN}   监控 Agent 安装脚本${NC}\n"
 printf "${BOLD}${CYAN}========================================${NC}\n\n"
 
 detect_os
+detect_region
 detect_nic
-input_config
 generate_agent
 start_agent
 print_summary
