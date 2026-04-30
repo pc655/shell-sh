@@ -69,7 +69,7 @@ detect_os() {
         info "正在配置系统依赖..."
         case "$SYS_TYPE" in
             alpine)
-                apk update -q && apk add -q curl procps coreutils awk grep || error "apk 安装失败"
+                apk update -q && apk add -q curl procps coreutils gawk grep || error "apk 安装失败"
                 ;;
             debian)
                 apt-get update -qq && apt-get install -y -qq curl gawk procps || error "apt 安装失败"
