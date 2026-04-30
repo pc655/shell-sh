@@ -16,6 +16,8 @@ title() { printf "\n${BOLD}${CYAN}==> %s${NC}\n" "$*"; }
 AGENT_FILE="/usr/local/bin/agent.sh"
 PID_FILE="/var/run/agent_monitor.pid"
 LOG_FILE="/var/log/agent_monitor.log"
+OPENRC_FILE="/etc/init.d/agent_monitor"
+LOCAL_START="/etc/local.d/agent_monitor.start"
 
 # ---------- 命令行参数解析 ----------
 NODE_ID=""
@@ -59,7 +61,6 @@ detect_os() {
     fi
 
     NEED=""
-    # 检查命令是否存在
     for cmd in curl awk grep ps df; do
         command -v "$cmd" >/dev/null 2>&1 || NEED="$NEED $cmd"
     done
@@ -68,14 +69,13 @@ detect_os() {
         info "正在配置系统依赖..."
         case "$SYS_TYPE" in
             alpine)
-                # 关键点：将 awk 改为 gawk，并添加 grep (Alpine 默认也是 busybox 版)
-                apk update -q && apk add -q curl procps coreutils gawk grep || error "apk 安装失败" 
+                apk update -q && apk add -q curl procps coreutils awk grep || error "apk 安装失败"
                 ;;
             debian)
-                apt-get update -qq && apt-get install -y -qq curl gawk procps || error "apt 安装失败" 
+                apt-get update -qq && apt-get install -y -qq curl gawk procps || error "apt 安装失败"
                 ;;
             *)
-                [ -n "$NEED" ] && error "请手动安装：$NEED" 
+                [ -n "$NEED" ] && error "请手动安装：$NEED"
                 ;;
         esac
     fi
@@ -288,7 +288,70 @@ start_agent() {
 }
 
 # =============================================
-# 7. 打印摘要
+# 7. 注册开机自启
+# =============================================
+setup_autostart() {
+    [ "$SYS_TYPE" != "alpine" ] && return
+
+    title "注册开机自启 (Alpine)"
+
+    # 优先尝试 OpenRC 方式
+    if command -v rc-update >/dev/null 2>&1; then
+        info "检测到 OpenRC，注册 init.d 服务..."
+
+        cat > "$OPENRC_FILE" << 'EOF'
+#!/sbin/openrc-run
+
+name="agent_monitor"
+description="监控 Agent 守护进程"
+command="/bin/sh"
+command_args="/usr/local/bin/agent.sh"
+command_background=true
+pidfile="/var/run/agent_monitor.pid"
+output_log="/var/log/agent_monitor.log"
+error_log="/var/log/agent_monitor.log"
+
+depend() {
+    need net
+    after firewall
+}
+EOF
+
+        chmod +x "$OPENRC_FILE"
+
+        # 移除旧注册（忽略错误），重新注册到 default runlevel
+        rc-update del agent_monitor 2>/dev/null
+        rc-update add agent_monitor default
+        ok "已注册 OpenRC 服务 → default runlevel"
+        return
+    fi
+
+    # 回退方案：/etc/local.d/（适用于 OpenVZ 等容器环境）
+    if [ -d /etc/local.d ]; then
+        info "未检测到 rc-update，使用 /etc/local.d/ 方案..."
+
+        cat > "$LOCAL_START" << EOF
+#!/bin/sh
+# 由 install_agent.sh 自动生成
+nohup sh /usr/local/bin/agent.sh >> /var/log/agent_monitor.log 2>&1 &
+EOF
+
+        chmod +x "$LOCAL_START"
+
+        # 确保 local 服务已启用
+        if command -v rc-update >/dev/null 2>&1; then
+            rc-update add local default 2>/dev/null || true
+        fi
+
+        ok "已注册开机自启：$LOCAL_START"
+        return
+    fi
+
+    warn "未找到合适的自启方案（无 OpenRC / 无 /etc/local.d），跳过"
+}
+
+# =============================================
+# 8. 打印摘要
 # =============================================
 print_summary() {
     title "安装完成"
@@ -299,11 +362,23 @@ print_summary() {
     printf "  ${BOLD}推送地址  :${NC} %s\n" "$PUSH_URL"
     printf "  ${BOLD}脚本路径  :${NC} %s\n" "$AGENT_FILE"
     printf "  ${BOLD}日志文件  :${NC} %s\n" "$LOG_FILE"
+
+    if [ "$SYS_TYPE" = "alpine" ]; then
+        if [ -f "$OPENRC_FILE" ]; then
+            printf "  ${BOLD}自启方式  :${NC} OpenRC (%s)\n" "$OPENRC_FILE"
+        elif [ -f "$LOCAL_START" ]; then
+            printf "  ${BOLD}自启方式  :${NC} local.d (%s)\n" "$LOCAL_START"
+        fi
+    fi
+
     printf "\n"
     printf "  ${BOLD}常用命令：${NC}\n"
-    printf "  停止:   kill \$(cat %s)\n" "$PID_FILE"
-    printf "  日志:   tail -f %s\n"     "$LOG_FILE"
-    printf "  调试:   sh %s\n"          "$AGENT_FILE"
+    printf "  停止:   kill \$(cat %s)\n"  "$PID_FILE"
+    printf "  日志:   tail -f %s\n"       "$LOG_FILE"
+    printf "  调试:   sh %s\n"            "$AGENT_FILE"
+    if [ "$SYS_TYPE" = "alpine" ] && [ -f "$OPENRC_FILE" ]; then
+        printf "  服务:   rc-service agent_monitor start|stop|status\n"
+    fi
     printf "\n"
 }
 
@@ -319,4 +394,5 @@ detect_region
 detect_nic
 generate_agent
 start_agent
+setup_autostart
 print_summary
