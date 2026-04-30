@@ -59,7 +59,7 @@ detect_os() {
     fi
 
     NEED=""
-    # Alpine 的 ps/df 默认是 busybox 版，安装 procps 获取完整功能
+    # 检查命令是否存在
     for cmd in curl awk grep ps df; do
         command -v "$cmd" >/dev/null 2>&1 || NEED="$NEED $cmd"
     done
@@ -68,8 +68,8 @@ detect_os() {
         info "正在配置系统依赖..."
         case "$SYS_TYPE" in
             alpine)
-                # Alpine 必须补充 procps 和 coreutils 才能兼容你的 agent 脚本逻辑
-                apk update -q && apk add -q curl procps coreutils awk grep || error "apk 安装失败" 
+                # 关键点：将 awk 改为 gawk，并添加 grep (Alpine 默认也是 busybox 版)
+                apk update -q && apk add -q curl procps coreutils gawk grep || error "apk 安装失败" 
                 ;;
             debian)
                 apt-get update -qq && apt-get install -y -qq curl gawk procps || error "apt 安装失败" 
